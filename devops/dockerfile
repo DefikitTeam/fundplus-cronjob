@@ -1,0 +1,12 @@
+FROM node:21.1.0 as builder
+WORKDIR /app
+COPY . . 
+RUN yarn && yarn build
+
+FROM node:21.1.0-slim
+WORKDIR /app
+COPY --from=builder /app ./
+RUN yarn global add pm2
+EXPOSE 3003
+LABEL base="false"
+CMD ["pm2-runtime" , "start" , "ecosystem.config.js" ]
