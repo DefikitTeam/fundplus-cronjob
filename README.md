@@ -39,3 +39,9 @@ docker compose up -d
 make serve
 ```
 
+5.1 Run local
+
+```bash
+yarn start:campaign
+```
+
