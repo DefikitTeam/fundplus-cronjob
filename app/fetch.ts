@@ -13,7 +13,7 @@ async function runJob() {
 
 const mainLoop = async function () {
   await runJob();
-  setTimeout(mainLoop, 30000);
+  setTimeout(mainLoop, 15000);
 };
 
 async function syncHistory() {

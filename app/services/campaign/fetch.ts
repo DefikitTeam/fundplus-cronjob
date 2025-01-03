@@ -7,7 +7,7 @@ import { Model, Connection as DbConnection, Types } from 'mongoose';
 
 import CampaignSchema, { ICampaign } from "../../db/schema/campaign.schema";
 import TransactionSchema, { ITransaction } from "../../db/schema/transaction.schema";
-import { AnchorProvider, BorshCoder, Idl, Program, Wallet, EventParser } from '@coral-xyz/anchor';
+import { AnchorProvider, BorshCoder, Idl, Program, Wallet, EventParser, BN } from '@coral-xyz/anchor';
 import IDL from '../idl/pre_pump.json';
 import { PromisePool } from '@supercharge/promise-pool';
 import { ethers } from 'ethers';
@@ -59,13 +59,54 @@ export default class CampaignService {
   async fetch() {
     if (this.isSyncing) return;
     this.isSyncing = true;
-    try {
-      // Check oldest first
-      console.log("Fetching campaign start");
-      await this.syncNewTransaction();
-      this.isSyncing = false;
-    } catch (e) {
-      console.log('CampaignService fetch error', e);
+  
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+  
+    while (retryCount < MAX_RETRIES) {
+      try {
+        console.log("Fetching campaign start");
+        const session = await this.dbConnection.startSession();
+  
+        try {
+          session.startTransaction();
+
+          // Update total funds
+          await this.updateAllCampaignFunds(session);
+          
+          // Clean up zero fund campaigns
+          await this.cleanupZeroFundCampaigns(session);
+          
+          // Then sync new transactions
+          await this.syncNewTransaction();
+          
+          await session.commitTransaction();
+          this.isSyncing = false;
+          return; // Success - exit the retry loop
+          
+        } catch (e) {
+          await session.abortTransaction();
+          throw e;
+        } finally {
+          await session.endSession();
+        }
+  
+      } catch (e) {
+        if (e.code === 112) { // WriteConflict error code
+          retryCount++;
+          console.log(`Retry attempt ${retryCount} due to write conflict`);
+          // Add small delay before retry
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } else {
+          console.log('CampaignService fetch error:', e);
+          break; // Exit on non-WriteConflict errors
+        }
+      }
+    }
+  
+    this.isSyncing = false;
+    if (retryCount === MAX_RETRIES) {
+      console.log('Max retries reached for handling write conflicts');
     }
   }
 
@@ -206,6 +247,7 @@ export default class CampaignService {
   }
 
   async handleCreatedCampaignEvent(data: any, session) {
+
     const campaign = new this.campaignModel();
     campaign.creator = data.creator.toString();
     campaign.campaignIndex = Number(data.campaignIndex.toString());
@@ -216,6 +258,123 @@ export default class CampaignService {
     campaign.depositDeadline = data.depositDeadline.toString();
     campaign.tradeDeadline = data.tradeDeadline.toString();
     campaign.timestamp = data.timestamp.toString();
+    /// Derive Campaign PDA
+    const creatorAddress = new PublicKey(data.creator);
+
+    const [campaignPDA, _] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), creatorAddress.toBuffer(), Buffer.from(data.campaignIndex.toArray("le", 8))],
+      new PublicKey(this.PROGRAM_ID)
+    );
+
+    // Fetch Campaign Account Info
+    const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
+    if (!campaignInfo) {
+      throw new Error('Campaign account not found');
+    }
+
+    // Calculate Total Fund Raised
+    const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
+    const totalFundRaised = campaignInfo.lamports - minimumRentExemption;
+
+    // Skip if zero fund raised
+    if (totalFundRaised === 0) {
+      return;
+    }
+
+    campaign.totalFundRaised = totalFundRaised;
+
     await campaign.save({ session });
+  }
+
+  async cleanupZeroFundCampaigns(session) {
+    const campaigns = await this.campaignModel.find();
+    
+    for (const campaign of campaigns) {
+      // Get current on-chain state
+      const [campaignPDA] = PublicKey.findProgramAddressSync(
+        [Buffer.from("campaign"), 
+         new PublicKey(campaign.creator).toBuffer(), 
+         Buffer.from(new BN(campaign.campaignIndex).toArray("le", 8))],
+        new PublicKey(this.PROGRAM_ID)
+      );
+  
+      const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
+      if (!campaignInfo) continue;
+  
+      const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
+      const currentFunds = campaignInfo.lamports - minimumRentExemption;
+  
+      // Delete if funds are now 0
+      if (currentFunds === 0) {
+        await this.campaignModel.deleteOne({ 
+          _id: campaign._id 
+        }, { session });
+      }
+    }
+  }
+
+  async updateCampaignFunds(campaign: ICampaign, session) {
+    const [campaignPDA] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("campaign"),
+        new PublicKey(campaign.creator).toBuffer(),
+        Buffer.from(new BN(campaign.campaignIndex).toArray("le", 8))
+      ],
+      new PublicKey(this.PROGRAM_ID)
+    );
+  
+    const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
+    if (!campaignInfo) return;
+  
+    const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
+    const currentFunds = campaignInfo.lamports - minimumRentExemption;
+  
+    // Use compound key instead of _id
+    await this.campaignModel.findOneAndUpdate(
+      { 
+        creator: campaign.creator,
+        campaignIndex: campaign.campaignIndex 
+      },
+      { totalFundRaised: currentFunds },
+      { session }
+    );
+  }
+  
+  // Function to update all campaign funds
+  async updateAllCampaignFunds(session) {
+    try {
+      const campaigns = await this.campaignModel.find();
+      
+      for (const campaign of campaigns) {
+        const [campaignPDA] = PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("campaign"), 
+            new PublicKey(campaign.creator).toBuffer(), 
+            Buffer.from(new BN(campaign.campaignIndex).toArray("le", 8))
+          ],
+          new PublicKey(this.PROGRAM_ID)
+        );
+      
+        const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
+        if (!campaignInfo) continue;
+      
+        const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
+        const currentFunds = campaignInfo.lamports - minimumRentExemption;
+  
+        // Delete if zero funds, otherwise update
+        if (currentFunds === 0) {
+          await this.campaignModel.deleteOne({ _id: campaign._id }, { session });
+        } else {
+          await this.campaignModel.findOneAndUpdate(
+            { _id: campaign._id },
+            { totalFundRaised: currentFunds },
+            { session }
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error updating campaign funds:', error);
+      throw error;
+    }
   }
 }
