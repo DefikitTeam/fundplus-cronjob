@@ -33,6 +33,27 @@ cp .env.example .env
 docker compose up -d
 ```
 
+- Note: Because this project uses mongo-replica, after running docker, you need to declare replicaset, specifically the steps will be as follows:
+
+  - First, connect to your MongoDB container:
+    ```bash
+    docker exec -it mongo-replica mongo
+    ```
+  - Once you're in the MongoDB shell, initate mongo-replica set:
+    ```bash
+    rs.initate();
+    ```
+  - Then run the reconfig command:
+    ```bash
+    rs.reconfig({
+      _id: "rs0",
+      members: [{
+        _id: 0,
+        host: "localhost:27017"
+      }]
+    }, {force: true})
+    ```
+
 5. Run job
 
 ```bash
