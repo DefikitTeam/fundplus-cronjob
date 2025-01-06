@@ -17,7 +17,6 @@ export default class CampaignFundService {
   private static instance: CampaignFundService;
   private isSyncing: boolean = false;
   private devnet = false;
-  private heliusKey: string;
   private rpc: string;
   private PROGRAM_ID: string = 'PREKP6cD7NZgWCfoSf3vqotpJfctuoeQV9j4cL81K15'
 
@@ -31,7 +30,6 @@ export default class CampaignFundService {
     this.db = setup._db;
     this.rpc = setup.rpc;
     this.devnet = setup.devnet;
-    this.heliusKey = setup.heliusKey;
 
     // Setup connection
     this.connection = new Connection(setup.rpc);

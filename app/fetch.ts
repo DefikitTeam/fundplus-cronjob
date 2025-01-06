@@ -38,8 +38,7 @@ async function syncHistory() {
   const config: SetupInterface = {
     _db: DB,
     rpc: process.env.RPC,
-    devnet: process.env.NODE_ENV === 'production' ? false : true,
-    heliusKey: process.env.HELIUS_KEY
+    devnet: process.env.NODE_ENV === 'production' ? false : true
   };
   await campaignService.getInstance().setup(config);
   await CampaignFundService.getInstance().setup(config);

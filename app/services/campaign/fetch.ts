@@ -13,6 +13,7 @@ import { PromisePool } from '@supercharge/promise-pool';
 import { ethers } from 'ethers';
 import { CampaignEvent } from "../../constant";
 import { sleep } from "../../utils/sleep";
+import { chunkArray } from "../../utils/math";
 
 require("dotenv").config();
 const { Keypair } = require('@solana/web3.js');
@@ -22,7 +23,6 @@ export default class CampaignService {
   private static instance: CampaignService;
   private isSyncing: boolean = false;
   private devnet = false;
-  private heliusKey: string;
   private rpc: string;
   private PROGRAM_ID: string = 'PREKP6cD7NZgWCfoSf3vqotpJfctuoeQV9j4cL81K15'
 
@@ -36,7 +36,6 @@ export default class CampaignService {
     this.db = setup._db;
     this.rpc = setup.rpc;
     this.devnet = setup.devnet;
-    this.heliusKey = setup.heliusKey;
 
     // Setup connection
     this.connection = new Connection(setup.rpc);
@@ -169,31 +168,22 @@ export default class CampaignService {
     if (signatures.length === 0) {
       return;
     }
-    // const splitedArr = this.chunkArray(signatures, 600);
-    // console.log("splitedArr", splitedArr);
     const transNotInOrder = [];
-    const chunkSize = 20;
-    // Process signatures in chunks of 10
-    for (let i = 0; i < signatures.length; i += chunkSize) {
-      if (i > 0) {
-        await sleep(10000)
-      }
-      const chunk = signatures.slice(i, i + chunkSize);
-      const { results, errors } = await PromisePool.withConcurrency(1)
-        .for(chunk)
-        .process(async (arr) => {
-          return await this.connection.getParsedTransaction(arr, {
-            maxSupportedTransactionVersion: 0,
-          });
+    const splitedArr = await chunkArray(signatures, 20);
+    const { results, errors } = await PromisePool.withConcurrency(1)
+      .for(splitedArr)
+      .process(async (arr) => {
+        await sleep(1000);
+        return await this.connection.getParsedTransactions(arr, {
+          maxSupportedTransactionVersion: 0,
         });
+      });
 
-      if (errors.length > 0) {
-        console.log("errors", errors);
-        throw errors;
-      }
-      transNotInOrder.push(...results);
-      console.log(`Processed signatures ${i + 1} to ${Math.min(i + chunkSize, signatures.length)}`);
+    if (errors.length > 0) {
+      console.log("errors", errors);
+      throw errors;
     }
+    transNotInOrder.push(...results.flat());
     console.log('FINAL signature need handle: ', transNotInOrder.length);
     const trans = transNotInOrder;
     const programId = new PublicKey(this.PROGRAM_ID);
