@@ -183,7 +183,9 @@ export default class CampaignService {
       console.log("errors", errors);
       throw errors;
     }
-    transNotInOrder.push(...results.flat());
+    for (const result of results) {
+      transNotInOrder.push(...result);
+    }
     console.log('FINAL signature need handle: ', transNotInOrder.length);
     const trans = transNotInOrder;
     const programId = new PublicKey(this.PROGRAM_ID);
