@@ -250,6 +250,7 @@ export default class CampaignService {
     campaign.depositDeadline = data.depositDeadline.toString();
     campaign.tradeDeadline = data.tradeDeadline.toString();
     campaign.timestamp = data.timestamp.toString();
+    campaign.mint = data.mint;
     /// Derive Campaign PDA
     const creatorAddress = new PublicKey(data.creator);
 
@@ -267,11 +268,6 @@ export default class CampaignService {
     // Calculate Total Fund Raised
     const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
     const totalFundRaised = campaignInfo.lamports - minimumRentExemption;
-
-    // Skip if zero fund raised
-    if (totalFundRaised === 0) {
-      return;
-    }
 
     campaign.totalFundRaised = totalFundRaised;
 

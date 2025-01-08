@@ -1,6 +1,7 @@
 import db from "./db/db";
 import campaignService from "./services/campaign/fetch";
 import CampaignFundService from "./services/campaign/fund-updater";
+import CreateTokenService from "./services/campaign/create-token";
 import { SetupInterface } from "./interfaces/setup.interface";
 require("dotenv").config();
 
@@ -20,6 +21,14 @@ async function runFundUpdateJob() {
   }
 }
 
+async function runCreateTokenJob() {
+  try {
+    await CreateTokenService.getInstance().fetch();
+  } catch (e) {
+    console.log(`CREATE TOKEN error`, e);
+  }
+}
+
 // cronjob for campaign list
 const mainLoop = async function () {
   await runJob();
@@ -32,6 +41,12 @@ const fundLoop = async function () {
   setTimeout(fundLoop, 15000);
 }
 
+// cronjob for create token
+const tokenLoop = async function () {
+  await runCreateTokenJob();
+  setTimeout(tokenLoop, 15000);
+}
+
 async function syncHistory() {
   const DB = await db.getInstance();
   await DB.connect();
@@ -41,8 +56,11 @@ async function syncHistory() {
     devnet: process.env.NODE_ENV === 'production' ? false : true
   };
   await campaignService.getInstance().setup(config);
+  await CreateTokenService.getInstance().setup(config);
   await CampaignFundService.getInstance().setup(config);
 
+  // Start token creation first to handle PENDING campaigns
+  tokenLoop();
   mainLoop();
   fundLoop();
 }

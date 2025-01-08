@@ -27,6 +27,9 @@ WORKDIR /usr/src-prod/app
 COPY package*.json ./
 RUN npm install --only=production && npm list
 
+# Install pm2 globally
+RUN npm install -g pm2
+
 COPY . .
 
 COPY .env ./.env
@@ -38,4 +41,3 @@ RUN cat ./.env
 RUN npm run build
 
 CMD ["pm2-runtime", "app.json"]
-

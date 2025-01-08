@@ -32,6 +32,7 @@ class CampaignSchema {
           tradeDeadline: { type: Number, required: false },
           timestamp: { type: Number, required: false },
           totalFundRaised: { type: Number, required: false },
+          mint: { type: String, required: false },
         },
         { timestamps: true }
       );

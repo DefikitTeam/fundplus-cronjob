@@ -41,7 +41,7 @@ docker compose up -d
     ```
   - Once you're in the MongoDB shell, initate mongo-replica set:
     ```bash
-    rs.initate();
+    rs.initiate();
     ```
   - Then run the reconfig command:
     ```bash
