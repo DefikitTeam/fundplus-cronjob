@@ -8,10 +8,12 @@ import { Connection, PublicKey, SystemProgram,
 import { Model, Connection as DbConnection, Types } from 'mongoose';
 
 import CampaignSchema, { ICampaign } from "../../db/schema/campaign.schema";
+import AddTokenPumpProcessSchema, { AddTokenProcessStatus, IAddTokenPumpProcess } from "../../db/schema/token-process.schema";
 import TransactionSchema, { ITransaction } from "../../db/schema/transaction.schema";
-import AddTokenPumpProcessSchema, {AddTokenProcessStatus, IAddTokenPumpProcess} from "../../db/schema/token-process.schema";
+import SellProgressSchema, { ISellProgress } from "../../db/schema/sold-out-campaigns.schema";
 import { AnchorProvider, BorshCoder, Idl, Program, Wallet, EventParser, BN } from '@coral-xyz/anchor';
 import IDL from '../idl/pre_pump.json';
+import PUMP_IDL from '../idl/pump.json';
 import { PromisePool } from '@supercharge/promise-pool';
 import { ethers } from 'ethers';
 import { CampaignEvent } from "../../constant";
@@ -32,14 +34,15 @@ import {
 require("dotenv").config();
 const { Keypair } = require('@solana/web3.js');
 
-export default class CreateTokenService {
+export default class SellProgressService {
   private db: DB;
-  private static instance: CreateTokenService;
+  private static instance: SellProgressService;
   private isSyncing: boolean = false;
   private devnet = false;
   private heliusKey: string;
   private rpc: string;
   private PROGRAM_ID: string = 'PREKP6cD7NZgWCfoSf3vqotpJfctuoeQV9j4cL81K15'
+  private PUMP_ID: string = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
 
   private connection;
   private dbConnection: DbConnection;
@@ -47,6 +50,7 @@ export default class CreateTokenService {
   private campaignModel: Model<ICampaign>;
   private transactionModel: Model<ITransaction>;
   private addTokenPumpProcessModel: Model<IAddTokenPumpProcess>;
+  private sellProgressModel: Model<ISellProgress>;
 
   private operatorKeyPair = Keypair.fromSecretKey(bs58.decode(process.env.OPERATOR_PRIV_KEY || ""));
 
@@ -61,16 +65,17 @@ export default class CreateTokenService {
     this.dbConnection = await this.db.getConnection();
     this.campaignModel = CampaignSchema.getModel();
     this.transactionModel = TransactionSchema.getModel();
+    this.sellProgressModel = SellProgressSchema.getModel();
     this.addTokenPumpProcessModel = AddTokenPumpProcessSchema.getModel();
   }
 
 
-  public static getInstance(): CreateTokenService {
-    if (!CreateTokenService.instance) {
-      CreateTokenService.instance = new CreateTokenService();
+  public static getInstance(): SellProgressService {
+    if (!SellProgressService.instance) {
+      SellProgressService.instance = new SellProgressService();
     }
 
-    return CreateTokenService.instance;
+    return SellProgressService.instance;
   }
 
   // Ensure that the cronjob is not running multiple times
@@ -83,13 +88,11 @@ export default class CreateTokenService {
   
     while (retryCount < MAX_RETRIES) {
       try {
-        console.log("Create Token check start");
+        console.log("Sell Prpgress Update start");
         const session = await this.dbConnection.startSession();
   
         try {
           session.startTransaction();
-
-          await this.syncAllCampaignStatuses(session);
           
           await this.syncNewTransaction();
           
@@ -242,12 +245,12 @@ export default class CreateTokenService {
         if (event.name === CampaignEvent.createdCampaignEvent) {
           await this.handleCreatedCampaignEvent(event.data, transactionSession);
         }
-        if (event.name === CampaignEvent.createdAndBoughtTokenEvent) {
-          await this.handleCreatedAndBoughtTokenEvent(event.data, transactionSession);
+        if (event.name === CampaignEvent.sellTokenEvent) {
+          await this.handleSellTokenEvent(event.data, transactionSession);
         }
-        // if (event.name === CampaignEvent.sellTokenEvent) {
-        //   await this.handleSellTokenEvent(event.data, transactionSession);
-        // }
+        if (event.name === CampaignEvent.claimedTokenEvent) {
+          await this.handleClaimedTokenEvent(event.data, transactionSession);
+        }
       }
       await newTransaction.save({ session: transactionSession });
       await transactionSession.commitTransaction();
@@ -259,9 +262,9 @@ export default class CreateTokenService {
       await transactionSession.endSession();
     }
   }
-
+  
   async handleCreatedCampaignEvent(data: any, session) {
-
+    
     const campaign = new this.campaignModel();
     campaign.creator = data.creator.toString();
     campaign.campaignIndex = Number(data.campaignIndex.toString());
@@ -275,136 +278,122 @@ export default class CreateTokenService {
     campaign.mint = data.mint;
     /// Derive Campaign PDA
     const creatorAddress = new PublicKey(data.creator);
-
+    
     const [campaignPDA, _] = PublicKey.findProgramAddressSync(
       [Buffer.from("campaign"), creatorAddress.toBuffer(), Buffer.from(data.campaignIndex.toArray("le", 8))],
       new PublicKey(this.PROGRAM_ID)
     );
-
+    
     // Fetch Campaign Account Info
     const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
     if (!campaignInfo) {
       throw new Error('Campaign account not found');
     }
-
+    
     // Calculate Total Fund Raised
     const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
     const totalFundRaised = campaignInfo.lamports - minimumRentExemption;
-
+    
     campaign.totalFundRaised = totalFundRaised;
-
+    
     await campaign.save({ session });
   }
 
-  async checkAndUpdateCampaignStatus(campaign: any, session) {
-    try {
-      // First check if campaign is already COMPLETED
-      const existingProcess = await this.addTokenPumpProcessModel.findOne({
-        creator: campaign.creator,
-        campaignIndex: campaign.campaignIndex
-      });
+  async handleSellTokenEvent(data: any, transactionSession: any) {
+    // const campaigns = await this.campaignModel.find();
 
-      if (existingProcess?.status === AddTokenProcessStatus.COMPLETED) {
-        console.log(`Campaign ${campaign.campaignIndex} is already COMPLETED - skipping status update`);
-        return existingProcess;
-      }
-  
-      const now = Math.floor(Date.now() / 1000);
-  
-      // Status checks with logging
-      const isPending = (
-        (campaign.totalFundRaised / 1e9).toFixed(2) >= campaign.donationGoal &&
-        campaign.depositDeadline >= now
-      ) && !campaign.mint;
+    // for (const campaign of campaigns) {
+    //   const creatorAddress = new PublicKey(campaign.creator);
 
-      const isCompleted = campaign.mint && 
-      campaign.mint !== "11111111111111111111111111111111";
-  
-      const isFailed = (
-        (campaign.totalFundRaised / 1e9).toFixed(2) < campaign.donationGoal &&
-        campaign.depositDeadline <= now
-      );
-  
-      const isRaising = (
-        (campaign.totalFundRaised / 1e9).toFixed(2) < campaign.donationGoal &&
-        campaign.depositDeadline > now
-      );
-  
-      let status = AddTokenProcessStatus.RAISING;
-      if (isPending) status = AddTokenProcessStatus.PENDING;
-      if (isFailed) status = AddTokenProcessStatus.FAILED;
-      if (isCompleted) status = AddTokenProcessStatus.COMPLETED;
-  
-      const result = await this.addTokenPumpProcessModel.findOneAndUpdate(
-        {
-          creator: campaign.creator,
-          campaignIndex: campaign.campaignIndex,
-        },
-        { 
-          status,
-          updatedAt: Date.now() 
-        },
-        { 
-          upsert: true, 
-          session, 
-          new: true,
-          setDefaultsOnInsert: true
-        }
-      );
-  
-      console.log(`Updated campaign ${campaign.campaignIndex} to status: ${status}`);
-      return result;
-  
-    } catch (err) {
-      console.error(`Error updating campaign ${campaign.campaignIndex}:`, err);
-      throw err;
-    }
-  }
+    //   const [campaignPDA, _] = PublicKey.findProgramAddressSync(
+    //     [Buffer.from("campaign"), creatorAddress.toBuffer(), Buffer.from(campaign.campaignIndex.toArray("le", 8))],
+    //     new PublicKey(this.PROGRAM_ID)
+    //   )
 
-  // TypeScript
-  async syncAllCampaignStatuses(session) {
-    const campaigns = await this.campaignModel.find();
-    for (const campaign of campaigns) {
-      await this.checkAndUpdateCampaignStatus(campaign, session);
-    }
-  }
+    //   const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
+    //   if (!campaignInfo) {
+    //     throw new Error('Campaign account not found');
+    //   };
+
+    //   if (!campaign.mint) {
+    //     continue;
+    //   }
   
-  async handleCreatedAndBoughtTokenEvent(data: any, session) {
+    //   const now = Math.floor(Date.now() / 1000);
+
+    //   const isTradingPassed = campaign.TradeDeadline < now;
+
+    //   const associatedCampaign = getAssociatedTokenAddressSync(new PublicKey(campaign.mint), campaignPDA, true);
+    //   const tokenAccountBalance = await this.connection.getTokenAccountBalance(associatedCampaign);
+    //   const soldAmount = campaign.totalTokenBought - tokenAccountBalance.value.uiAmount;
+
+    //   const isSoldOut = soldAmount >= campaign.totalTokenBought;
+
+    //   if (isSoldOut && !isTradingPassed) {
+    //     const sellProgress = new this.sellProgressModel({
+    //       creator: campaign.creator,
+    //       campaignIndex: campaign.campaignIndex,
+    //       is_sell_all: true,
+    //       claimable_amount: 0,
+    //     });
+    //     await sellProgress.save({ session: transactionSession });
+    //   } else {
+    //     const sellProgress = new this.sellProgressModel({
+    //       creator: campaign.creator,
+    //       campaignIndex: campaign.campaignIndex,
+    //       is_sell_all: false,
+    //       claimable_amount: 0,
+    //     });
+    //     await sellProgress.save({ session: transactionSession });
+    //   }
+
+    // }
+
     try {
       const campaign = await this.campaignModel.findOne({
         creator: data.creator.toString(),
-        campaignIndex: Number(data.campaignIndex.toString()),
+        campaignIndex: Number(data.campaignIndex.toString())
       });
-    
+
       if (!campaign) {
-        console.log('Campaign not found');
-        return;
+        throw new Error('Campaign not found');
       }
-    
-      await this.addTokenPumpProcessModel.findOneAndUpdate(
+
+      const sellProgress = new this.sellProgressModel({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+        is_sell_all: true,
+        mint: data.mint.toString(),
+        claimale_amount: 0,
+      })
+
+      await sellProgress.save({ session: transactionSession });
+    } catch (error) {
+      console.error('Error handling sell token event:', error);
+      throw error;
+    }
+  }
+
+  async handleClaimedTokenEvent(data: any, transactionSession: any) {
+    try {
+      const sellProgress = await this.sellProgressModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString())
+      });
+
+      if (!sellProgress) {
+        throw new Error('No sold out campaign found');
+      }
+
+      await this.sellProgressModel.findOneAndUpdate(
+        {creator: data.creator.toString(), campaignIndex: Number(data.campaignIndex.toString())},
         {
-          creator: data.creator.toString(),
-          campaignIndex: Number(data.campaignIndex.toString()),
+          claimable_amount: Number(data.amount.toString())
         },
-        {
-          status: AddTokenProcessStatus.COMPLETED,
-          mint: data.mint.toString(),
-        },
-        { session: session }
-      );
-  
-      await this.campaignModel.findOneAndUpdate(
-        {
-          creator: data.creator.toString(),
-          campaignIndex: Number(data.campaignIndex.toString()),
-        },
-        {
-          mint: data.mint.toString(),
-        },
-        { session: session }
+        { session: transactionSession }
       );
     } catch (error) {
-      console.error('Error handling created and bought token event:', error);
+      console.error('Error handling claimed token event:', error);
       throw error;
     }
   }

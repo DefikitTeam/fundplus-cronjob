@@ -26,6 +26,7 @@ class AddTokenPumpProcessSchema {
         {
           creator: { type: String, required: true },
           campaignIndex: { type: Number, required: true },
+          mint: { type: String, required: false },
           status: { type: String, required: true },
         },
         { timestamps: true }

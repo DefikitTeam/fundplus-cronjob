@@ -2,6 +2,7 @@ import db from "./db/db";
 import campaignService from "./services/campaign/fetch";
 import CampaignFundService from "./services/campaign/fund-updater";
 import CreateTokenService from "./services/campaign/create-token";
+import SellProgressService from "./services/campaign/sell-progress";
 import { SetupInterface } from "./interfaces/setup.interface";
 require("dotenv").config();
 
@@ -29,6 +30,14 @@ async function runCreateTokenJob() {
   }
 }
 
+async function runSellProgressJob() {
+  try {
+    await SellProgressService.getInstance().fetch();
+  } catch (e) {
+    console.log(`SELL PROGRESS UPDATE error`, e);
+  }
+}
+
 // cronjob for campaign list
 const mainLoop = async function () {
   await runJob();
@@ -47,6 +56,12 @@ const tokenLoop = async function () {
   setTimeout(tokenLoop, 15000);
 }
 
+// cronjob for sell progress
+const sellLoop = async function () {
+  await runSellProgressJob();
+  setTimeout(sellLoop, 15000);
+}
+
 async function syncHistory() {
   const DB = await db.getInstance();
   await DB.connect();
@@ -58,11 +73,13 @@ async function syncHistory() {
   await campaignService.getInstance().setup(config);
   await CreateTokenService.getInstance().setup(config);
   await CampaignFundService.getInstance().setup(config);
+  await SellProgressService.getInstance().setup(config);
 
   // Start token creation first to handle PENDING campaigns
   tokenLoop();
   mainLoop();
   fundLoop();
+  sellLoop();
 }
 
 (async () => {
