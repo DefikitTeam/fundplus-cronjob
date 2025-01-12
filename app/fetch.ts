@@ -3,6 +3,7 @@ import campaignService from "./services/campaign/fetch";
 import CampaignFundService from "./services/campaign/fund-updater";
 import CreateTokenService from "./services/campaign/create-token";
 import SellProgressService from "./services/campaign/sell-progress";
+import ClaimMonitorService from "./services/campaign/claim-monitor";
 import { SetupInterface } from "./interfaces/setup.interface";
 require("dotenv").config();
 
@@ -38,6 +39,14 @@ async function runSellProgressJob() {
   }
 }
 
+async function runClaimMonitorJob() {
+  try {
+    await ClaimMonitorService.getInstance().fetch();
+  } catch (e) {
+    console.log(`CLAIM MONITOR error`, e);
+  }
+}
+
 // cronjob for campaign list
 const mainLoop = async function () {
   await runJob();
@@ -62,6 +71,12 @@ const sellLoop = async function () {
   setTimeout(sellLoop, 15000);
 }
 
+// cronjob for claim monitor
+const claimLoop = async function () {
+  await runClaimMonitorJob();
+  setTimeout(claimLoop, 15000);
+}
+
 async function syncHistory() {
   const DB = await db.getInstance();
   await DB.connect();
@@ -74,12 +89,14 @@ async function syncHistory() {
   await CreateTokenService.getInstance().setup(config);
   await CampaignFundService.getInstance().setup(config);
   await SellProgressService.getInstance().setup(config);
+  await ClaimMonitorService.getInstance().setup(config);
 
   // Start token creation first to handle PENDING campaigns
   tokenLoop();
   mainLoop();
   fundLoop();
   sellLoop();
+  claimLoop();
 }
 
 (async () => {
