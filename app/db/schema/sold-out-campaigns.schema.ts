@@ -23,6 +23,7 @@ class SellProgressSchema {
           is_sell_all: { type: Boolean, required: true },
           mint: { type: String, required: true },
           claimable_amount: { type: Number, required: true },
+          market_cap: { type: Number, required: true, default: 0 },
         },
         { timestamps: true }
       );

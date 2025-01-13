@@ -134,6 +134,7 @@ export default class CampaignFundService {
       })
 
       if (processRecord?.status === AddTokenProcessStatus.COMPLETED) {
+        console.log(`Skipping COMPLETED campaign ${campaign.campaignIndex}`);
         continue;
       }
 

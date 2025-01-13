@@ -168,23 +168,30 @@ export default class CampaignService {
     if (signatures.length === 0) {
       return;
     }
+    // const splitedArr = this.chunkArray(signatures, 600);
+    // console.log("splitedArr", splitedArr);
     const transNotInOrder = [];
-    const splitedArr = await chunkArray(signatures, 20);
-    const { results, errors } = await PromisePool.withConcurrency(1)
-      .for(splitedArr)
-      .process(async (arr) => {
-        await sleep(1000);
-        return await this.connection.getParsedTransactions(arr, {
-          maxSupportedTransactionVersion: 0,
+    const chunkSize = 20;
+    // Process signatures in chunks of 10
+    for (let i = 0; i < signatures.length; i += chunkSize) {
+      if (i > 0) {
+        await sleep(10000)
+      }
+      const chunk = signatures.slice(i, i + chunkSize);
+      const { results, errors } = await PromisePool.withConcurrency(1)
+        .for(chunk)
+        .process(async (arr) => {
+          return await this.connection.getParsedTransaction(arr, {
+            maxSupportedTransactionVersion: 0,
+          });
         });
-      });
 
-    if (errors.length > 0) {
-      console.log("errors", errors);
-      throw errors;
-    }
-    for (const result of results) {
-      transNotInOrder.push(...result);
+      if (errors.length > 0) {
+        console.log("errors", errors);
+        throw errors;
+      }
+      transNotInOrder.push(...results);
+      console.log(`Processed signatures ${i + 1} to ${Math.min(i + chunkSize, signatures.length)}`);
     }
     console.log('FINAL signature need handle: ', transNotInOrder.length);
     const trans = transNotInOrder;

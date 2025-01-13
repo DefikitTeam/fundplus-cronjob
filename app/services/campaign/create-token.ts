@@ -4,12 +4,14 @@ import {
 } from "../../interfaces";
 import { Connection, PublicKey, SystemProgram, 
   SYSVAR_RENT_PUBKEY, 
-  clusterApiUrl } from "@solana/web3.js";
+  clusterApiUrl, 
+  Transaction} from "@solana/web3.js";
 import { Model, Connection as DbConnection, Types } from 'mongoose';
 
 import CampaignSchema, { ICampaign } from "../../db/schema/campaign.schema";
 import TransactionSchema, { ITransaction } from "../../db/schema/transaction.schema";
 import AddTokenPumpProcessSchema, {AddTokenProcessStatus, IAddTokenPumpProcess} from "../../db/schema/token-process.schema";
+import SellProgressSchema, { ISellProgress } from "../../db/schema/sold-out-campaigns.schema";
 import { AnchorProvider, BorshCoder, Idl, Program, Wallet, EventParser, BN } from '@coral-xyz/anchor';
 import IDL from '../idl/pre_pump.json';
 import { PromisePool } from '@supercharge/promise-pool';
@@ -32,6 +34,27 @@ import {
 require("dotenv").config();
 const { Keypair } = require('@solana/web3.js');
 
+export type GeckoResponse = {
+  "data": {
+    "id": "string",
+    "type": "string",
+    "attributes": {
+      "name": "string",
+      "address": "string",
+      "symbol": "string",
+      "decimals": 0,
+      "total_supply": "string",
+      "coingecko_coin_id": "string",
+      "price_usd": "string",
+      "fdv_usd": "string",
+      "total_reserve_in_usd": "string",
+      "volume_usd": {},
+      "market_cap_usd": "string"
+    },
+    "relationships": {}
+  }
+}
+
 export default class CreateTokenService {
   private db: DB;
   private static instance: CreateTokenService;
@@ -47,6 +70,7 @@ export default class CreateTokenService {
   private campaignModel: Model<ICampaign>;
   private transactionModel: Model<ITransaction>;
   private addTokenPumpProcessModel: Model<IAddTokenPumpProcess>;
+  private sellProgressModel: Model<ISellProgress>;
 
   private operatorKeyPair = Keypair.fromSecretKey(bs58.decode(process.env.OPERATOR_PRIV_KEY || ""));
 
@@ -62,6 +86,7 @@ export default class CreateTokenService {
     this.campaignModel = CampaignSchema.getModel();
     this.transactionModel = TransactionSchema.getModel();
     this.addTokenPumpProcessModel = AddTokenPumpProcessSchema.getModel();
+    this.sellProgressModel = SellProgressSchema.getModel();
   }
 
 
@@ -90,6 +115,21 @@ export default class CreateTokenService {
           session.startTransaction();
 
           await this.syncAllCampaignStatuses(session);
+
+          const sellProgresses = await this.sellProgressModel.find({
+            is_sell_all: true,
+          });
+
+          for (const sellProgress of sellProgresses) {
+            const campaign = await this.campaignModel.findOne({
+              creator: sellProgress.creator,
+              campaignIndex: sellProgress.campaignIndex,
+            });
+
+            if (campaign) {
+              await this.monitorMarketCap(campaign, session);
+            }
+          }
           
           await this.syncNewTransaction();
           
@@ -317,10 +357,9 @@ export default class CreateTokenService {
         campaign.depositDeadline >= now
       ) && !campaign.mint;
 
-      const isCompleted = campaign.mint && 
-      campaign.mint !== "11111111111111111111111111111111";
+      const isCompleted = campaign.mint;
   
-      const isFailed = (
+      const isFailed = !campaign.mint && (
         (campaign.totalFundRaised / 1e9).toFixed(2) < campaign.donationGoal &&
         campaign.depositDeadline <= now
       );
@@ -328,7 +367,7 @@ export default class CreateTokenService {
       const isRaising = (
         (campaign.totalFundRaised / 1e9).toFixed(2) < campaign.donationGoal &&
         campaign.depositDeadline > now
-      );
+      ) && !campaign.mint;
   
       let status = AddTokenProcessStatus.RAISING;
       if (isPending) status = AddTokenProcessStatus.PENDING;
@@ -342,11 +381,11 @@ export default class CreateTokenService {
         },
         { 
           status,
-          updatedAt: Date.now() 
+          updatedAt: Date.now()
         },
         { 
           upsert: true, 
-          session, 
+          session,
           new: true,
           setDefaultsOnInsert: true
         }
@@ -390,7 +429,7 @@ export default class CreateTokenService {
           status: AddTokenProcessStatus.COMPLETED,
           mint: data.mint.toString(),
         },
-        { session: session }
+        { upsert: true, new: true, session: session }
       );
   
       await this.campaignModel.findOneAndUpdate(
@@ -401,10 +440,174 @@ export default class CreateTokenService {
         {
           mint: data.mint.toString(),
         },
-        { session: session }
+        { upsert: true, new: true, session: session }
       );
     } catch (error) {
       console.error('Error handling created and bought token event:', error);
+      throw error;
+    }
+  }
+
+  async handleSellTokenEvent(data: any, transactionSession: any) {
+    try {
+      const campaign = await this.campaignModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString())
+      });
+
+      if (!campaign) {
+        throw new Error('Campaign not found');
+      }
+
+      const sellProgress = new this.sellProgressModel({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+        is_sell_all: true,
+        mint: data.mint.toString(),
+        claimale_amount: 0,
+      })
+
+      await sellProgress.save({ session: transactionSession });
+    } catch (error) {
+      console.error('Error handling sell token event:', error);
+      throw error;
+    }
+  }
+
+  async monitorMarketCap(campaign: any, session: any) {
+    const wallet = new Wallet(this.operatorKeyPair);
+    const provider = new AnchorProvider(this.connection, wallet);
+    const program = new Program(IDL as Idl, provider);
+    const tx = new Transaction();
+
+
+    const [campaignPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), new PublicKey(campaign.creator).toBuffer(), Buffer.from( (new BN(campaign.campaignIndex)).toArray("le", 8))],
+      new PublicKey(this.PROGRAM_ID)
+    )
+
+    const [configPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("config")],
+      new PublicKey(this.PROGRAM_ID)
+    );
+
+    const campaignData = await this.connection.getAccountInfo(campaignPDA);
+
+
+    let claimAmount = new BN(0);
+    let marketCapNumber = 0;
+
+    try {
+      const response = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${campaignData.mint}`);
+      const data = await response.json() as GeckoResponse;
+      const marketCap = data.data.attributes.market_cap_usd;
+      marketCapNumber = parseFloat(marketCap);
+      const totalBoughtAmount = campaignData.totalTokenBought;
+
+      if (marketCapNumber >= 5_000_000) {
+        // For $5M+ market cap, claim 20%
+        claimAmount = totalBoughtAmount.muln(20).divn(100);
+      } else if (marketCapNumber >= 2_000_000) {
+        // For $2M+ market cap, claim 40%
+        claimAmount = totalBoughtAmount.muln(40).divn(100);
+      } else if (marketCapNumber >= 1_000_000) {
+        // For $1M+ market cap, claim 30%
+        claimAmount = totalBoughtAmount.muln(30).divn(100);
+      } else if (marketCapNumber >= 500_000) {
+        // For $500k+ market cap, claim 10%
+        claimAmount = totalBoughtAmount.muln(10).divn(100);
+      }
+
+      // Ensure we don't claim more than what's available
+      const remainingToClaim = totalBoughtAmount.sub(campaignData.totalClaimed);
+      if (claimAmount.gt(remainingToClaim)) {
+        claimAmount = remainingToClaim;
+      }
+    } catch (error) {
+      console.error("Error fetching token data:", error);
+      return null;
+    }
+
+    tx.add(await program.methods.updateClaimableAmount(claimAmount).accounts({
+      operator: this.operatorKeyPair.publicKey,
+      config: configPDA,
+      campaignAccount: campaignPDA,
+      creator: new PublicKey(campaign.creator),
+      mint: new PublicKey(campaignData.mint),
+      systemProgram: SystemProgram.programId,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      rent: SYSVAR_RENT_PUBKEY,
+    }).instruction());
+
+    return {
+      transaction: tx,
+      marketCap: marketCapNumber
+    }
+  }
+
+  async handleUpdatedClaimableTokenAmountEvent(data: any, transactionSession: any) {
+    try {
+      const campaign = await this.campaignModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+      })
+
+      if (!campaign) {
+        console.log('Campaign not found');
+        return;
+      }
+
+      const marketCapResult = await this.monitorMarketCap(campaign, transactionSession);
+
+      const sellProgress = await this.sellProgressModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+        is_sell_all: true, // Only update if is_sell_all is true ==> canbe trade
+      });
+  
+      if (!sellProgress) {
+        console.log('Campaign not found');
+        return;
+      }
+  
+      await this.sellProgressModel.findOneAndUpdate(
+        {
+          creator: data.creator.toString(),
+          campaignIndex: Number(data.campaignIndex.toString()),
+        },
+        {
+          claimable_amount: Number(ethers.utils.formatUnits(data.claimable_amount.toString(), 9)),
+          mint: data.mint.toString(),
+          market_cap: marketCapResult.marketCap,
+        },
+        { session: transactionSession }
+      );
+    } catch (error) {
+      console.error("Error updating claimable amount:", error);
+      throw error;
+    }
+  }
+
+  async handleClaimedTokenEvent(data: any, transactionSession: any) {
+    try {
+      const sellProgress = await this.sellProgressModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString())
+      });
+
+      if (!sellProgress) {
+        throw new Error('No sold out campaign found');
+      }
+
+      await this.sellProgressModel.findOneAndUpdate(
+        {creator: data.creator.toString(), campaignIndex: Number(data.campaignIndex.toString())},
+        {
+          claimable_amount: Number(data.amount.toString())
+        },
+        { session: transactionSession }
+      );
+    } catch (error) {
+      console.error('Error handling claimed token event:', error);
       throw error;
     }
   }

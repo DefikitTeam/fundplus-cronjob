@@ -30,6 +30,7 @@ import {
 import { 
   publicKey 
 } from "@metaplex-foundation/umi";
+import { chunkArray } from "../../utils/math";
 
 require("dotenv").config();
 const { Keypair } = require('@solana/web3.js');
@@ -185,30 +186,23 @@ export default class SellProgressService {
     if (signatures.length === 0) {
       return;
     }
-    // const splitedArr = this.chunkArray(signatures, 600);
-    // console.log("splitedArr", splitedArr);
     const transNotInOrder = [];
-    const chunkSize = 20;
-    // Process signatures in chunks of 10
-    for (let i = 0; i < signatures.length; i += chunkSize) {
-      if (i > 0) {
-        await sleep(10000)
-      }
-      const chunk = signatures.slice(i, i + chunkSize);
-      const { results, errors } = await PromisePool.withConcurrency(1)
-        .for(chunk)
-        .process(async (arr) => {
-          return await this.connection.getParsedTransaction(arr, {
-            maxSupportedTransactionVersion: 0,
-          });
+    const splitedArr = await chunkArray(signatures, 20);
+    const { results, errors } = await PromisePool.withConcurrency(1)
+      .for(splitedArr)
+      .process(async (arr) => {
+        await sleep(5000);
+        return await this.connection.getParsedTransactions(arr, {
+          maxSupportedTransactionVersion: 0,
         });
+      });
 
-      if (errors.length > 0) {
-        console.log("errors", errors);
-        throw errors;
-      }
-      transNotInOrder.push(...results);
-      console.log(`Processed signatures ${i + 1} to ${Math.min(i + chunkSize, signatures.length)}`);
+    if (errors.length > 0) {
+      console.log("errors", errors);
+      throw errors;
+    }
+    for (const result of results) {
+      transNotInOrder.push(...result);
     }
     console.log('FINAL signature need handle: ', transNotInOrder.length);
     const trans = transNotInOrder;
@@ -242,9 +236,6 @@ export default class SellProgressService {
       newTransaction.blockTime = tran.blockTime;
       console.log('Received events:', events);
       for (const event of events) {
-        if (event.name === CampaignEvent.createdCampaignEvent) {
-          await this.handleCreatedCampaignEvent(event.data, transactionSession);
-        }
         if (event.name === CampaignEvent.sellTokenEvent) {
           await this.handleSellTokenEvent(event.data, transactionSession);
         }
@@ -262,42 +253,7 @@ export default class SellProgressService {
       await transactionSession.endSession();
     }
   }
-  
-  async handleCreatedCampaignEvent(data: any, session) {
-    
-    const campaign = new this.campaignModel();
-    campaign.creator = data.creator.toString();
-    campaign.campaignIndex = Number(data.campaignIndex.toString());
-    campaign.name = data.name.toString();
-    campaign.symbol = data.symbol.toString();
-    campaign.uri = data.uri.toString();
-    campaign.donationGoal = Number(ethers.utils.formatUnits(data.donationGoal.toString(), 9).toString());
-    campaign.depositDeadline = data.depositDeadline.toString();
-    campaign.tradeDeadline = data.tradeDeadline.toString();
-    campaign.timestamp = data.timestamp.toString();
-    campaign.mint = data.mint;
-    /// Derive Campaign PDA
-    const creatorAddress = new PublicKey(data.creator);
-    
-    const [campaignPDA, _] = PublicKey.findProgramAddressSync(
-      [Buffer.from("campaign"), creatorAddress.toBuffer(), Buffer.from(data.campaignIndex.toArray("le", 8))],
-      new PublicKey(this.PROGRAM_ID)
-    );
-    
-    // Fetch Campaign Account Info
-    const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
-    if (!campaignInfo) {
-      throw new Error('Campaign account not found');
-    }
-    
-    // Calculate Total Fund Raised
-    const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
-    const totalFundRaised = campaignInfo.lamports - minimumRentExemption;
-    
-    campaign.totalFundRaised = totalFundRaised;
-    
-    await campaign.save({ session });
-  }
+
 
   async handleSellTokenEvent(data: any, transactionSession: any) {
     // const campaigns = await this.campaignModel.find();

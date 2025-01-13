@@ -31,6 +31,7 @@ import {
 import { 
   publicKey 
 } from "@metaplex-foundation/umi";
+import { chunkArray } from "../../utils/math";
 
 require("dotenv").config();
 const { Keypair } = require('@solana/web3.js');
@@ -222,30 +223,23 @@ export default class ClaimMonitorService {
     if (signatures.length === 0) {
       return;
     }
-    // const splitedArr = this.chunkArray(signatures, 600);
-    // console.log("splitedArr", splitedArr);
     const transNotInOrder = [];
-    const chunkSize = 20;
-    // Process signatures in chunks of 10
-    for (let i = 0; i < signatures.length; i += chunkSize) {
-      if (i > 0) {
-        await sleep(10000)
-      }
-      const chunk = signatures.slice(i, i + chunkSize);
-      const { results, errors } = await PromisePool.withConcurrency(1)
-        .for(chunk)
-        .process(async (arr) => {
-          return await this.connection.getParsedTransaction(arr, {
-            maxSupportedTransactionVersion: 0,
-          });
+    const splitedArr = await chunkArray(signatures, 20);
+    const { results, errors } = await PromisePool.withConcurrency(1)
+      .for(splitedArr)
+      .process(async (arr) => {
+        await sleep(5000);
+        return await this.connection.getParsedTransactions(arr, {
+          maxSupportedTransactionVersion: 0,
         });
+      });
 
-      if (errors.length > 0) {
-        console.log("errors", errors);
-        throw errors;
-      }
-      transNotInOrder.push(...results);
-      console.log(`Processed signatures ${i + 1} to ${Math.min(i + chunkSize, signatures.length)}`);
+    if (errors.length > 0) {
+      console.log("errors", errors);
+      throw errors;
+    }
+    for (const result of results) {
+      transNotInOrder.push(...result);
     }
     console.log('FINAL signature need handle: ', transNotInOrder.length);
     const trans = transNotInOrder;
@@ -279,9 +273,6 @@ export default class ClaimMonitorService {
       newTransaction.blockTime = tran.blockTime;
       console.log('Received events:', events);
       for (const event of events) {
-        if (event.name === CampaignEvent.createdCampaignEvent) {
-          await this.handleCreatedCampaignEvent(event.data, transactionSession);
-        }
         if (event.name === CampaignEvent.updatedClaimableTokenAmountEvent) {
           await this.handleUpdatedClaimableTokenAmountEvent(event.data, transactionSession);
         }
@@ -295,42 +286,6 @@ export default class ClaimMonitorService {
     } finally {
       await transactionSession.endSession();
     }
-  }
-  
-  async handleCreatedCampaignEvent(data: any, session) {
-    
-    const campaign = new this.campaignModel();
-    campaign.creator = data.creator.toString();
-    campaign.campaignIndex = Number(data.campaignIndex.toString());
-    campaign.name = data.name.toString();
-    campaign.symbol = data.symbol.toString();
-    campaign.uri = data.uri.toString();
-    campaign.donationGoal = Number(ethers.utils.formatUnits(data.donationGoal.toString(), 9).toString());
-    campaign.depositDeadline = data.depositDeadline.toString();
-    campaign.tradeDeadline = data.tradeDeadline.toString();
-    campaign.timestamp = data.timestamp.toString();
-    campaign.mint = data.mint;
-    /// Derive Campaign PDA
-    const creatorAddress = new PublicKey(data.creator);
-    
-    const [campaignPDA, _] = PublicKey.findProgramAddressSync(
-      [Buffer.from("campaign"), creatorAddress.toBuffer(), Buffer.from(data.campaignIndex.toArray("le", 8))],
-      new PublicKey(this.PROGRAM_ID)
-    );
-    
-    // Fetch Campaign Account Info
-    const campaignInfo = await this.connection.getAccountInfo(campaignPDA);
-    if (!campaignInfo) {
-      throw new Error('Campaign account not found');
-    }
-    
-    // Calculate Total Fund Raised
-    const minimumRentExemption = await this.connection.getMinimumBalanceForRentExemption(campaignInfo.data.length);
-    const totalFundRaised = campaignInfo.lamports - minimumRentExemption;
-    
-    campaign.totalFundRaised = totalFundRaised;
-    
-    await campaign.save({ session });
   }
 
   async monitorMarketCap(campaign: any, session: any) {
@@ -354,12 +309,13 @@ export default class ClaimMonitorService {
 
 
     let claimAmount = new BN(0);
+    let marketCapNumber = 0;
 
     try {
       const response = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${campaignData.mint}`);
       const data = await response.json() as GeckoResponse;
       const marketCap = data.data.attributes.market_cap_usd;
-      const marketCapNumber = parseFloat(marketCap);
+      marketCapNumber = parseFloat(marketCap);
       const totalBoughtAmount = campaignData.totalTokenBought;
 
       if (marketCapNumber >= 5_000_000) {
@@ -397,11 +353,26 @@ export default class ClaimMonitorService {
       rent: SYSVAR_RENT_PUBKEY,
     }).instruction());
 
-    return tx;
+    return {
+      transaction: tx,
+      marketCap: marketCapNumber
+    }
   }
 
   async handleUpdatedClaimableTokenAmountEvent(data: any, transactionSession: any) {
     try {
+      const campaign = await this.campaignModel.findOne({
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+      })
+
+      if (!campaign) {
+        console.log('Campaign not found');
+        return;
+      }
+
+      const marketCapResult = await this.monitorMarketCap(campaign, transactionSession);
+
       const sellProgress = await this.sellProgressModel.findOne({
         creator: data.creator.toString(),
         campaignIndex: Number(data.campaignIndex.toString()),
@@ -421,6 +392,7 @@ export default class ClaimMonitorService {
         {
           claimable_amount: Number(ethers.utils.formatUnits(data.claimable_amount.toString(), 9)),
           mint: data.mint.toString(),
+          market_cap: marketCapResult.marketCap,
         },
         { session: transactionSession }
       );
