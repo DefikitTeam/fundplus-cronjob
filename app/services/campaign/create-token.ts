@@ -285,9 +285,15 @@ export default class CreateTokenService {
         if (event.name === CampaignEvent.createdAndBoughtTokenEvent) {
           await this.handleCreatedAndBoughtTokenEvent(event.data, transactionSession);
         }
-        // if (event.name === CampaignEvent.sellTokenEvent) {
-        //   await this.handleSellTokenEvent(event.data, transactionSession);
-        // }
+        if (event.name === CampaignEvent.sellTokenEvent) {
+          await this.handleSellTokenEvent(event.data, transactionSession);
+        }
+        if (event.name === CampaignEvent.updatedClaimableTokenAmountEvent) {
+          await this.handleUpdatedClaimableTokenAmountEvent(event.data, transactionSession);
+        }
+        if (event.name === CampaignEvent.claimedTokenEvent) {
+          await this.handleClaimedTokenEvent(event.data, transactionSession);
+        }
       }
       await newTransaction.save({ session: transactionSession });
       await transactionSession.commitTransaction();
