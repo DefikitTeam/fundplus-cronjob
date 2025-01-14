@@ -55,9 +55,9 @@ export type GeckoResponse = {
   }
 }
 
-export default class CreateTokenService {
+export default class CampaignService {
   private db: DB;
-  private static instance: CreateTokenService;
+  private static instance: CampaignService;
   private isSyncing: boolean = false;
   private devnet = false;
   private heliusKey: string;
@@ -90,12 +90,12 @@ export default class CreateTokenService {
   }
 
 
-  public static getInstance(): CreateTokenService {
-    if (!CreateTokenService.instance) {
-      CreateTokenService.instance = new CreateTokenService();
+  public static getInstance(): CampaignService {
+    if (!CampaignService.instance) {
+      CampaignService.instance = new CampaignService();
     }
 
-    return CreateTokenService.instance;
+    return CampaignService.instance;
   }
 
   // Ensure that the cronjob is not running multiple times
@@ -116,9 +116,7 @@ export default class CreateTokenService {
 
           await this.syncAllCampaignStatuses(session);
 
-          const sellProgresses = await this.sellProgressModel.find({
-            is_sell_all: true,
-          });
+          const sellProgresses = await this.sellProgressModel.find();
 
           for (const sellProgress of sellProgresses) {
             const campaign = await this.campaignModel.findOne({
@@ -294,6 +292,9 @@ export default class CreateTokenService {
         if (event.name === CampaignEvent.claimedTokenEvent) {
           await this.handleClaimedTokenEvent(event.data, transactionSession);
         }
+        if (event.name === CampaignEvent.claimedFundEvent) {
+          await this.handleClaimedFundEvent(event.data, transactionSession);
+        }
       }
       await newTransaction.save({ session: transactionSession });
       await transactionSession.commitTransaction();
@@ -340,6 +341,18 @@ export default class CreateTokenService {
     campaign.totalFundRaised = totalFundRaised;
 
     await campaign.save({ session });
+  }
+
+  async handleClaimedFundEvent(data: any, transactionSession: any) {
+    await this.campaignModel.findOneAndUpdate(
+      {
+        creator: data.creator.toString(),
+        campaignIndex: Number(data.campaignIndex.toString()),
+      },
+      {
+        totalFundRaised: 0,
+      },
+    )
   }
 
   async checkAndUpdateCampaignStatus(campaign: any, session) {
@@ -456,24 +469,29 @@ export default class CreateTokenService {
 
   async handleSellTokenEvent(data: any, transactionSession: any) {
     try {
-      const campaign = await this.campaignModel.findOne({
-        creator: data.creator.toString(),
-        campaignIndex: Number(data.campaignIndex.toString())
-      });
-
-      if (!campaign) {
-        throw new Error('Campaign not found');
-      }
-
-      const sellProgress = new this.sellProgressModel({
-        creator: data.creator.toString(),
-        campaignIndex: Number(data.campaignIndex.toString()),
-        is_sell_all: true,
-        mint: data.mint.toString(),
-        claimale_amount: 0,
-      })
-
-      await sellProgress.save({ session: transactionSession });
+      // Delete from all relevant schemas
+      await Promise.all([
+        // Delete from campaign model
+        this.campaignModel.deleteOne({
+          creator: data.creator.toString(),
+          campaignIndex: Number(data.campaignIndex.toString())
+        }, { session: transactionSession }),
+  
+        // Delete from token process model 
+        this.addTokenPumpProcessModel.deleteOne({
+          creator: data.creator.toString(),
+          campaignIndex: Number(data.campaignIndex.toString())
+        }, { session: transactionSession }),
+  
+        // Delete from sell progress model
+        this.sellProgressModel.deleteOne({
+          creator: data.creator.toString(),
+          campaignIndex: Number(data.campaignIndex.toString())
+        }, { session: transactionSession })
+      ]);
+  
+      console.log(`Deleted campaign ${data.campaignIndex} after SellTokenEvent`);
+  
     } catch (error) {
       console.error('Error handling sell token event:', error);
       throw error;
@@ -568,7 +586,6 @@ export default class CreateTokenService {
       const sellProgress = await this.sellProgressModel.findOne({
         creator: data.creator.toString(),
         campaignIndex: Number(data.campaignIndex.toString()),
-        is_sell_all: true, // Only update if is_sell_all is true ==> canbe trade
       });
   
       if (!sellProgress) {

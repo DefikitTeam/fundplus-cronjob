@@ -3,7 +3,6 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface ISellProgress extends Document {
   creator: string;
   campaignIndex: number;
-  is_sell_all: boolean;
   market_cap: number;
   createdAt: number;
   updatedAt: number;
@@ -20,7 +19,6 @@ class SellProgressSchema {
         {
           creator: { type: String, required: true },
           campaignIndex: { type: Number, required: true },
-          is_sell_all: { type: Boolean, required: true },
           mint: { type: String, required: true },
           claimable_amount: { type: Number, required: true },
           market_cap: { type: Number, required: true, default: 0 },
