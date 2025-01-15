@@ -5,6 +5,7 @@ build/
 .idea
 dist
 package-lock.json
+yarn.lock
 .vscode/
 xox-dev-local.json
 yarn-error.log
