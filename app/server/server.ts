@@ -4,7 +4,7 @@ import { configs }  from '../config';
 
 const server = Fastify();
 
-server.get('/', async (request, reply) => {
+server.get('/healthcheck', async (request, reply) => {
     return { status: true };
 });
 
