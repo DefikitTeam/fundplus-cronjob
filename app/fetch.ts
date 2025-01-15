@@ -3,6 +3,7 @@ import CampaignFundService from "./services/campaign/fund-updater";
 import CampaignService from "./services/campaign/campaign-service";
 import { SetupInterface } from "./interfaces/setup.interface";
 require("dotenv").config();
+import { start } from './server/server'
 
 async function runFundUpdateJob() {
   try {
@@ -50,4 +51,5 @@ async function syncHistory() {
 
 (async () => {
   await syncHistory();
+  await start();
 })();
