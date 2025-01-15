@@ -1,19 +1,19 @@
 import Fastify from 'fastify';
+require("dotenv").config();
+import { configs }  from '../config';
 
-export const server = Fastify();
+const server = Fastify();
 
 server.get('/', async (request, reply) => {
     return { status: true };
 });
 
-const start = async () => {
+export const start = async () => {
     try {
-        await server.listen({ port: 3000 });
+        await server.listen({ port: configs.api.port ?? 3000 });
         console.log('Server is running at http://localhost:3000');
     } catch (err) {
         server.log.error(err);
         process.exit(1);
     }
 };
-
-start();

@@ -1,8 +1,8 @@
 import db from "./db/db";
 import campaignService from "./services/campaign/fetch";
 import { SetupInterface } from "./interfaces/setup.interface";
-import {server} from './server/server';
 require("dotenv").config();
+import { start } from './server/server'
 
 async function runJob() {
   try {
@@ -32,8 +32,5 @@ async function syncHistory() {
 
 (async () => {
   await syncHistory();
-  await server.listen({
-    host: 'localhost',
-    port: 3000,
-  })
+  await start();
 })();
